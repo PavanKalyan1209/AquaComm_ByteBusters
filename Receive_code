@@ -1,0 +1,104 @@
+package com.example.aquacomm
+
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Bundle
+import android.util.Log
+import android.view.SurfaceView
+import android.view.WindowManager
+import android.widget.Toast
+import androidx.appcompat.app.AppCompatActivity
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
+import com.example.aquacomm.databinding.ActivityReceiveBinding
+import org.opencv.android.*
+import org.opencv.core.*
+import org.opencv.imgproc.Imgproc
+
+class ReceiveActivity : AppCompatActivity(), CameraBridgeViewBase.CvCameraViewListener2 {
+
+    private lateinit var binding: ActivityReceiveBinding
+    private val TAG = "AquaComm_Receiver"
+    private val CAMERA_PERMISSION_REQUEST_CODE = 200
+
+    // Reverse map for decoding. 5-bit pulses -> Character
+    private val my5BitLogicMap = mapOf(
+        "....." to 'A', "....-" to 'B', "...-." to 'C', "...--" to 'D', "..-.." to 'E',
+        "..-.-" to 'F', "..--." to 'G', "..---" to 'H', ".-..." to 'I', ".-..-" to 'J',
+        ".-.-." to 'K', ".-.--" to 'L', ".---." to 'M', ".----" to 'N', "-...." to 'O',
+        "-...-" to 'P', "-..-." to 'Q', "-..--" to 'R', "-.-.." to 'S', "-.-.-" to 'T',
+        "-.--." to 'U', "-.---" to 'V', "--..." to 'W', "--..-" to 'X', "--.-." to 'Y',
+        "----." to 'Z'
+    )
+
+    // Signal processing variables
+    private var maxObserved = 100.0
+    private var minObserved = 50.0
+    private var smoothedBrightness = 0.0
+    private var bitBuffer = StringBuilder()
+    private var lastStateChange = System.currentTimeMillis()
+    private var isLightActive = false
+    private var charProcessed = true
+    
+    private val ROI_SIZE = 160 // Size of the tracking square in pixels
+    private val MIN_BRIGHTNESS_FLOOR = 80.0 
+    private var roiCenter = Point(0.0, 0.0)
+
+    private val mLoaderCallback = object : BaseLoaderCallback(this) {
+        override fun onManagerConnected(status: Int) {
+            if (status == LoaderCallbackInterface.SUCCESS) {
+                checkCameraPermission()
+            } else {
+                super.onManagerConnected(status)
+            }
+        }
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        // Keep the screen on so the camera doesn't time out during reception
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        binding = ActivityReceiveBinding.inflate(layoutInflater)
+        setContentView(binding.root)
+        binding.cameraSurface.setCvCameraViewListener(this)
+
+        binding.receivedText.text = ""
+    }
+
+    override fun onCameraFrame(inputFrame: CameraBridgeViewBase.CvCameraViewFrame): Mat {
+        val rgba = inputFrame.rgba()
+        val gray = inputFrame.gray()
+
+        // 1. LIGHT TRACKING: Find the brightest spot in the frame
+        val globalMMR = Core.minMaxLoc(gray)
+        val currentMax = globalMMR.maxVal
+        
+        if (currentMax > MIN_BRIGHTNESS_FLOOR) {
+            val brightestPoint = globalMMR.maxLoc
+            // Initialize or smoothly move the Region of Interest (ROI) toward the light source
+            if (roiCenter.x == 0.0 && roiCenter.y == 0.0) {
+                roiCenter = brightestPoint
+            } else {
+                // Exponential Moving Average (EMA) to prevent jittery tracking
+                roiCenter.x = (0.2 * brightestPoint.x) + (0.8 * roiCenter.x)
+                roiCenter.y = (0.2 * brightestPoint.y) + (0.8 * roiCenter.y)
+            }
+        }
+
+        // 2. CROP ROI: Focus only on the area around the light source
+        val x = (roiCenter.x - ROI_SIZE / 2).coerceIn(0.0, (gray.cols() - ROI_SIZE).toDouble()).toInt()
+        val y = (roiCenter.y - ROI_SIZE / 2).coerceIn(0.0, (gray.rows() - ROI_SIZE).toDouble()).toInt()
+        val roiRect = Rect(x, y, ROI_SIZE, ROI_SIZE)
+        val roiGray = gray.submat(roiRect)
+
+        // 3. SIGNAL CLEANING: Blur the image to remove sensor noise
+        Imgproc.GaussianBlur(roiGray, roiGray, Size(7.0, 7.0), 0.0)
+        val currentRaw = Core.mean(roiGray).`val`[0]
+        smoothedBrightness = (0.5 * currentRaw) + (0.5 * smoothedBrightness)
+
+        // 4. ADAPTIVE THRESHOLDING: Adjust sensitivity based on ambient light levels
+        // This helps the app work in both dark rooms and bright offices
+        if (smoothedBrightness > maxObserved) {
+            maxObserved = smoothedBrightness
+        } else {
+            maxObserved = maxObserved * 0.99
