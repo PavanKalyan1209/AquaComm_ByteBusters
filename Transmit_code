@@ -1,0 +1,85 @@
+package com.example.aquacomm
+
+import android.content.Context
+import android.hardware.camera2.CameraAccessException
+import android.hardware.camera2.CameraManager
+import android.os.Bundle
+import android.widget.Toast
+import androidx.appcompat.app.AppCompatActivity
+import androidx.lifecycle.lifecycleScope
+import com.example.aquacomm.databinding.ActivityTransmitBinding
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+
+class TransmitActivity : AppCompatActivity() {
+
+    private lateinit var binding: ActivityTransmitBinding
+
+    // Mapping alphabet to a custom 5-bit pulse system
+    // '.' is a short burst, '-' is a long burst
+    private val my5BitLogicMap = mapOf(
+        'A' to ".....", 'B' to "....-", 'C' to "...-.", 'D' to "...--", 'E' to "..-..",
+        'F' to "..-.-", 'G' to "..---", 'H' to "..--.", 'I' to ".-...", 'J' to ".-..-",
+        'K' to ".-.-.", 'L' to ".-.--", 'M' to ".---.", 'N' to ".----", 'O' to "-....",
+        'P' to "-...-", 'Q' to "-..-.", 'R' to "-..--", 'S' to "-.-..", 'T' to "-.-.-",
+        'U' to "-.--.", 'V' to "-.---", 'W' to "--...", 'X' to "--..-", 'Y' to "--.-.",
+        'Z' to "----."
+    )
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        binding = ActivityTransmitBinding.inflate(layoutInflater)
+        setContentView(binding.root)
+
+        binding.btnTransmit.setOnClickListener {
+            val message = binding.etMessage.text.toString().uppercase()
+            if (message.isNotEmpty()) {
+                transmitMessage(message)
+            }
+        }
+
+        binding.btnBack.setOnClickListener { finish() }
+    }
+
+    private fun transmitMessage(message: String) {
+        val cameraManager = getSystemService(Context.CAMERA_SERVICE) as CameraManager
+        // Just grab the first camera (usually the back one with the flash)
+        val cameraId = try { cameraManager.cameraIdList[0] } catch (e: Exception) { return }
+
+        // Use lifecycleScope so the flashing stops if the user closes the activity
+        lifecycleScope.launch {
+            binding.btnTransmit.isEnabled = false
+            
+            // Give the user time to aim the phone before it starts blasting light
+            Toast.makeText(this@TransmitActivity, "Starting in 3 seconds...", Toast.LENGTH_SHORT).show()
+            delay(3000L)
+
+            for (char in message) {
+                val pattern = my5BitLogicMap[char] ?: continue // Skip unknown characters
+
+                for (symbol in pattern) {
+                    val onDuration = if (symbol == '.') 250L else 600L
+
+                    try {
+                        // Turn flash on
+                        cameraManager.setTorchMode(cameraId, true)
+                        delay(onDuration)
+                        
+                        // Turn flash off
+                        cameraManager.setTorchMode(cameraId, false)
+                        
+                        // Small "off" period between dots/dashes so they don't bleed together
+                        delay(300L) 
+                    } catch (e: CameraAccessException) {
+                        e.printStackTrace()
+                    }
+                }
+                // Longer pause between letters so the receiver can distinguish them
+                delay(1200L) 
+            }
+
+            binding.btnTransmit.isEnabled = true
+            Toast.makeText(this@TransmitActivity, "Done!", Toast.LENGTH_SHORT).show()
+        }
+    }
+}
